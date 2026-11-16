@@ -69,7 +69,7 @@ async def lifespan(app: FastAPI):
 
 
 def build_app(checkpoint: str, workers: int, num_threads: int) -> FastAPI:
-    app = FastAPI(title="Acoustic Sensor", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="AudioGuard", version="0.1.0", lifespan=lifespan)
     state = AppState()
     app.state.runtime = state
 

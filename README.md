@@ -1,4 +1,6 @@
-# acousticSensor · Experimental v0.1
+# AudioGuard · Experimental v0.1
+
+仓库与目录名：`audioguard`。
 
 播放器音频异常检测实验项目：log-mel + 因果卷积 + 单向 GRU，输出逐帧多标签
 概率。支持训练、离线文件检测、流式检测和 HTTP 服务。代码采用 [MIT](LICENSE)。

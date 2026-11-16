@@ -21,7 +21,7 @@ def run(*args):
 def main():
     import numpy as np
     import soundfile as sf
-    with tempfile.TemporaryDirectory(prefix="acoustic-smoke-") as temp:
+    with tempfile.TemporaryDirectory(prefix="audioguard-smoke-") as temp:
         tmp = Path(temp)
         cfg = yaml.safe_load((ROOT / "configs/demo.yaml").read_text())
         cfg["paths"] = {key: str(tmp / key) for key in cfg["paths"]}
@@ -38,7 +38,7 @@ def main():
         result = json.loads((tmp / "result.json").read_text())
         assert result[0]["n_frames"] == 96
         assert list((tmp / "errors").glob("*.png"))
-    print("PASS acoustic generate/train/infer/analyze; temporary artifacts removed")
+    print("PASS AudioGuard generate/train/infer/analyze; temporary artifacts removed")
 
 
 if __name__ == "__main__":
