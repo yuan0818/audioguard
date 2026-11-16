@@ -1,0 +1,147 @@
+# 播放器音频异常检测 — 默认配置
+# 所有路径相对项目根目录或使用绝对路径
+
+seed: 42
+
+# ---------- 音频与特征 ----------
+audio:
+  sample_rate: 44100     # 播放器标准采样率，保留高频以检测 harsh
+  mono: true
+  segment_duration: 3.0  # 训练片段长度（秒）
+  min_duration: 1.0      # 短于此的样本丢弃
+
+features:
+  n_fft: 2048
+  hop_length: 441        # ~10ms @ 44.1kHz
+  win_length: 2048
+  n_mels: 128
+  f_min: 20
+  f_max: 22050           # Nyquist @ 44.1kHz
+  log_eps: 1.0e-6        # log 压缩下限
+  normalize: true
+  normalization: fixed  # identical affine transform during training/offline/streaming
+  norm_mean: -40.0
+  norm_std: 20.0
+
+# ---------- 异常类别 ----------
+# 顺序即标签索引，全 0 = 干净
+classes:
+  - noise               # 杂音/背景噪声
+  - harsh               # 尖锐刺耳
+  - clip_intermittent   # 爆音/断续
+  - distortion          # 失真/破音
+  - hum                  # 工频干扰
+  - silence_loss        # 静音/信号丢失
+  - loudness_anomaly    # 音量异常
+
+# ---------- 数据源 ----------
+data:
+  source: synth                     # synth | real（真实音源注入合成异常）| labeled（人工标注）
+  real_manifests: []                # 例: [data/raw/esc50_44k/manifest.csv]
+  labeled_jsonl: data/raw/labels.jsonl
+
+# ---------- 合成数据 ----------
+synth:
+  sr: 44100
+  segment_duration: 3.0
+  # 单次合成随机注入 0..max_classes 类
+  max_classes: 3
+  p_clean: 0.15         # 生成干净样本的比例
+  # 各类别注入参数（详见 src/data/synth_anomalies.py）
+  noise:
+    snr_db: [5.0, 40.0]
+    colors: [white, pink, brown]
+  harsh:
+    gain_db: [6.0, 18.0]
+    freq_range: [4000.0, 14000.0]
+    q: [1.0, 6.0]
+    n_peaks: [2, 4]
+    p_excite: 0.5
+    excite_cutoff: [3000.0, 6000.0]
+    excite_drive: [2.0, 6.0]
+    excite_mix: [0.3, 1.0]
+  clip_intermittent:
+    clip_thresh: [0.2, 0.6]
+    p_hard_clip: 0.6
+    dropout_p: [0.0, 0.15]
+    dropout_chunk_ms: [20, 150]
+    n_clicks: [1, 6]
+    click_ms: [1, 8]
+    click_amp: [0.3, 1.0]
+    p_stutter: 0.4
+    stutter_ms: [30, 120]
+  distortion:
+    drive: [1.5, 6.0]
+    kind: [tanh, cubic, soft]
+  hum:
+    freq: [50.0, 60.0]
+    n_harmonics: [2, 6]
+    amp: [0.01, 0.15]
+  silence_loss:
+    whole_p: 0.3        # 整段静音概率
+    chunk_p: [0.1, 0.4]
+  loudness_anomaly:
+    gain_db: [6.0, 24.0]
+    p_overcompress: 0.5
+
+# ---------- 模型 ----------
+model:
+  name: base            # small | base
+  n_mels: 128
+  n_classes: 7
+  base:
+    channels: [32, 64, 96, 128]   # 每个 conv block 输出通道
+    kernel: [3, 3, 3, 3]
+    pool: [2, 2, 2, 2]            # 沿 mel 池化
+    gru_hidden: 128
+    dropout: 0.2
+  small:
+    channels: [16, 32, 48, 64]
+    kernel: [3, 3, 3, 3]
+    pool: [2, 2, 2, 2]
+    gru_hidden: 64
+    dropout: 0.2
+
+# ---------- 训练 ----------
+train:
+  train_size: 2048        # 合成训练样本数（每 epoch 即时生成）
+  val_size: 256
+  batch_size: 32
+  epochs: 50
+  lr: 1.0e-3
+  weight_decay: 1.0e-5
+  optimizer: adam        # adam | adamw
+  scheduler: cosine       # cosine | plateau
+  early_stop_patience: 8
+  loss: frame_seg        # bce | focal | frame_seg（帧级+片段级双重监督）
+  seg_weight: 1.0        # 片段级损失权重（frame_seg 时生效）
+  focal_gamma: 2.0
+  # 类别不平衡正样本权重（覆盖时会按统计自动重算）
+  pos_weight: null
+  clip_grad: 5.0
+  num_workers: 4
+
+# ---------- 评估 ----------
+eval:
+  thresholds: null       # null = 在验证集自动调优
+  target_f1: 0.7
+
+# ---------- 推理 ----------
+inference:
+  # 流式
+  streaming:
+    hop_ms: 100           # 推理步进毫秒
+    target_latency_ms: 300
+    smooth_window: 1      # 帧概率滑动平均窗
+  # 离线
+  offline:
+    min_segment_ms: 200   # 短于此的连续正预测合并丢弃
+
+# ---------- 路径 ----------
+paths:
+  data_raw: data/raw
+  data_synth: data/synth
+  data_processed: data/processed
+  checkpoints: checkpoints
+  runs: runs
+  logs: logs

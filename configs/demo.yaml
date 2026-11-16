@@ -1,0 +1,198 @@
+seed: 42
+audio:
+  sample_rate: 44100
+  mono: true
+  segment_duration: 3.0
+  min_duration: 1.0
+features:
+  n_fft: 2048
+  hop_length: 441
+  win_length: 2048
+  n_mels: 128
+  f_min: 20
+  f_max: 22050
+  log_eps: 1.0e-06
+  normalize: true
+  normalization: fixed
+  norm_mean: -40.0
+  norm_std: 20.0
+classes:
+- noise
+- harsh
+- clip_intermittent
+- distortion
+- hum
+- silence_loss
+- loudness_anomaly
+data:
+  source: synth
+  real_manifests: []
+  labeled_jsonl: data/raw/labels.jsonl
+synth:
+  sr: 44100
+  segment_duration: 3.0
+  max_classes: 3
+  p_clean: 0.15
+  noise:
+    snr_db:
+    - 5.0
+    - 40.0
+    colors:
+    - white
+    - pink
+    - brown
+  harsh:
+    gain_db:
+    - 6.0
+    - 18.0
+    freq_range:
+    - 4000.0
+    - 14000.0
+    q:
+    - 1.0
+    - 6.0
+    n_peaks:
+    - 2
+    - 4
+    p_excite: 0.5
+    excite_cutoff:
+    - 3000.0
+    - 6000.0
+    excite_drive:
+    - 2.0
+    - 6.0
+    excite_mix:
+    - 0.3
+    - 1.0
+  clip_intermittent:
+    clip_thresh:
+    - 0.2
+    - 0.6
+    p_hard_clip: 0.6
+    dropout_p:
+    - 0.0
+    - 0.15
+    dropout_chunk_ms:
+    - 20
+    - 150
+    n_clicks:
+    - 1
+    - 6
+    click_ms:
+    - 1
+    - 8
+    click_amp:
+    - 0.3
+    - 1.0
+    p_stutter: 0.4
+    stutter_ms:
+    - 30
+    - 120
+  distortion:
+    drive:
+    - 1.5
+    - 6.0
+    kind:
+    - tanh
+    - cubic
+    - soft
+  hum:
+    freq:
+    - 50.0
+    - 60.0
+    n_harmonics:
+    - 2
+    - 6
+    amp:
+    - 0.01
+    - 0.15
+  silence_loss:
+    whole_p: 0.3
+    chunk_p:
+    - 0.1
+    - 0.4
+  loudness_anomaly:
+    gain_db:
+    - 6.0
+    - 24.0
+    p_overcompress: 0.5
+model:
+  name: small
+  n_mels: 128
+  n_classes: 7
+  base:
+    channels:
+    - 32
+    - 64
+    - 96
+    - 128
+    kernel:
+    - 3
+    - 3
+    - 3
+    - 3
+    pool:
+    - 2
+    - 2
+    - 2
+    - 2
+    gru_hidden: 128
+    dropout: 0.2
+  small:
+    channels:
+    - 16
+    - 32
+    - 48
+    - 64
+    kernel:
+    - 3
+    - 3
+    - 3
+    - 3
+    pool:
+    - 2
+    - 2
+    - 2
+    - 2
+    gru_hidden: 64
+    dropout: 0.2
+train:
+  train_size: 16
+  val_size: 8
+  batch_size: 4
+  epochs: 1
+  lr: 0.001
+  weight_decay: 1.0e-05
+  optimizer: adam
+  scheduler: cosine
+  early_stop_patience: 8
+  loss: frame_seg
+  seg_weight: 1.0
+  focal_gamma: 2.0
+  pos_weight:
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  clip_grad: 5.0
+  num_workers: 0
+eval:
+  thresholds: null
+  target_f1: 0.7
+inference:
+  streaming:
+    hop_ms: 100
+    target_latency_ms: 300
+    smooth_window: 1
+  offline:
+    min_segment_ms: 200
+paths:
+  data_raw: data/raw
+  data_synth: data/synth
+  data_processed: data/processed
+  checkpoints: checkpoints/demo
+  runs: runs
+  logs: logs/demo
