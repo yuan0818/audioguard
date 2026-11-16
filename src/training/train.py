@@ -17,6 +17,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 from torch.utils.data import DataLoader
 
 from src.data import synth_anomalies as synth
+from src.models.pooling import clip_pooling_method
 from src.data.dataset import AnomalyDataset, collate_variable
 from src.evaluation.evaluate import evaluate_model, print_metrics
 from src.models.crnn import build_model
@@ -206,7 +207,8 @@ def main() -> int:
 
         metrics, thresholds, clip_thresholds = evaluate_model(
             model, val_loader, device, thresholds=None, class_names=cfg["classes"],
-            smooth_window=cfg.get("inference", {}).get("streaming", {}).get("smooth_window", 1))
+            smooth_window=cfg.get("inference", {}).get("streaming", {}).get("smooth_window", 1),
+            clip_pooling=clip_pooling_method(cfg))
         f1 = metrics["macro"]["f1"]          # 帧级 macro F1（早停依据）
         cf1 = metrics["clip"]["macro"]["f1"]
         print(f"\n[Epoch {epoch+1}/{epochs}] loss={running/len(train_loader):.4f}  "

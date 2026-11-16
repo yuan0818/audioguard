@@ -6,6 +6,12 @@
 接口：
     compute_mel(audio, sr, cfg) -> np.ndarray [n_mels, T]
     MelStream: 增量喂入音频块，逐帧吐出 mel 帧。
+
+可选时域统计（features.time_features: true）：对每帧同一窗口的原始样本计算
+N_TD 个统计量（峰值/RMS/峰均比/近满幅占比/瞬态跳变/过零率/零值与平顶占比/
+子块包络跨度），作为额外行拼接在 log-mel 之后 -> [n_mels + N_TD, T]。
+它们只依赖该帧窗口内的样本，因此天然因果、流式与离线逐帧一致；
+用于弥补 46ms STFT 窗口抹平的毫秒级爆音、削波、断续线索。
 """
 
 from __future__ import annotations
@@ -33,6 +39,15 @@ class MelConfig:
     normalization: str = "clip"  # legacy checkpoints; new configs use fixed
     norm_mean: float = -40.0
     norm_std: float = 20.0
+    time_features: bool = False  # 旧 checkpoint 无此键 -> 仅 log-mel
+
+    @property
+    def n_td(self) -> int:
+        return N_TD if self.time_features else 0
+
+    @property
+    def n_features(self) -> int:
+        return self.n_mels + self.n_td
 
     @classmethod
     def from_cfg(cls, cfg: Mapping, sample_rate: int | None = None) -> "MelConfig":
@@ -51,6 +66,7 @@ class MelConfig:
             normalization=feat.get("normalization", "clip"),
             norm_mean=feat.get("norm_mean", -40.0),
             norm_std=feat.get("norm_std", 20.0),
+            time_features=bool(feat.get("time_features", False)),
         )
 
     def frame_ms(self) -> float:
@@ -74,17 +90,83 @@ def _window(cfg: MelConfig) -> np.ndarray:
     return librosa.filters.get_window("hann", cfg.win_length, fftbins=True).astype(np.float32)
 
 
-def _frames(audio: np.ndarray, cfg: MelConfig) -> np.ndarray:
-    """center=False 分帧，返回 [n_frames, n_fft] 的加窗帧。"""
+def _raw_frames(audio: np.ndarray, cfg: MelConfig) -> np.ndarray:
+    """center=False 分帧，返回 [n_frames, n_fft] 的未加窗帧。"""
     if len(audio) < cfg.n_fft:
         pad = np.zeros(cfg.n_fft - len(audio), dtype=np.float32)
         audio = np.concatenate([audio, pad])
     # librosa.util.frame: 滑窗切片
-    frames = librosa.util.frame(
+    return librosa.util.frame(
         audio, frame_length=cfg.win_length, hop_length=cfg.hop_length, axis=0
     )
+
+
+def _frames(audio: np.ndarray, cfg: MelConfig) -> np.ndarray:
+    """center=False 分帧，返回 [n_frames, n_fft] 的加窗帧。"""
     win = _window(cfg)
-    return frames * win[np.newaxis, :].astype(np.float32)
+    return _raw_frames(audio, cfg) * win[np.newaxis, :].astype(np.float32)
+
+
+# --------------------------------------------------------------------------- #
+# 时域统计特征
+# --------------------------------------------------------------------------- #
+TD_NAMES = (
+    "peak_db",     # 帧峰值电平
+    "rms_db",      # 帧 RMS 电平
+    "crest_db",    # 峰均比（削波/过压缩会降低，爆音会升高）
+    "top_frac",    # |x| >= 0.98*peak 的样本占比（硬削波平顶）
+    "jump",        # log10(max|dx| / mean|dx|)（点击/爆音瞬态）
+    "zcr",         # 过零率
+    "zero_frac",   # 近零样本占比（dropout/静音）
+    "flat_frac",   # 相邻样本完全相等且非零的占比（削波平顶/卡死）
+    "env_range",   # 帧内 16 个子块 RMS(dB) 的极差（断续/卡顿）
+)
+N_TD = len(TD_NAMES)
+TD_LEVEL_ROWS = (0, 1)   # 随整体增益平移的行（peak_db, rms_db）
+TD_DB_SCALE = 1.0 / 20.0  # 这两行 1 dB 对应的特征偏移
+_TD_SUBBLOCKS = 16
+
+
+def time_domain_features(raw: np.ndarray) -> np.ndarray:
+    """未加窗帧 [T, N] -> 固定仿射归一化后的时域统计 [N_TD, T]。
+
+    只使用每帧自身窗口内的样本，与 log-mel 帧完全对齐（因果、流式可复现）。
+    """
+    x = np.asarray(raw, dtype=np.float64)
+    if x.ndim != 2:
+        raise ValueError("Expected [n_frames, n_fft] frames")
+    T, N = x.shape
+    if T == 0:
+        return np.zeros((N_TD, 0), dtype=np.float32)
+    ax = np.abs(x)
+    peak = ax.max(axis=1)
+    rms = np.sqrt((x * x).mean(axis=1))
+    peak_db = 20.0 * np.log10(peak + 1e-5)
+    rms_db = 20.0 * np.log10(rms + 1e-5)
+    crest_db = peak_db - rms_db
+    top_frac = np.where(peak > 1e-4, (ax >= 0.98 * peak[:, None]).mean(axis=1), 0.0)
+    dx = np.abs(np.diff(x, axis=1))
+    jump = np.log10((dx.max(axis=1) + 1e-7) / (dx.mean(axis=1) + 1e-7))
+    sgn = np.signbit(x)
+    zcr = (sgn[:, 1:] != sgn[:, :-1]).mean(axis=1)
+    zero_frac = (ax < 1e-5).mean(axis=1)
+    flat_frac = ((dx < 1e-7) & (ax[:, 1:] > 1e-3)).mean(axis=1)
+    nb = N // _TD_SUBBLOCKS
+    sub = x[:, : nb * _TD_SUBBLOCKS].reshape(T, _TD_SUBBLOCKS, nb)
+    sub_db = 20.0 * np.log10(np.sqrt((sub * sub).mean(axis=2)) + 1e-5)
+    env_range = np.minimum(sub_db.max(axis=1) - sub_db.min(axis=1), 60.0)
+    feats = np.stack([
+        (peak_db + 20.0) / 20.0,
+        (rms_db + 30.0) / 20.0,
+        (crest_db - 12.0) / 6.0,
+        top_frac * 10.0,
+        jump - 1.0,
+        zcr * 4.0,
+        zero_frac * 2.0,
+        flat_frac * 2.0,
+        env_range / 20.0,
+    ], axis=0)
+    return feats.astype(np.float32)
 
 
 def _frames_to_mel(frames: np.ndarray, cfg: MelConfig, fb: np.ndarray) -> np.ndarray:
@@ -117,21 +199,42 @@ def compute_mel(audio: np.ndarray, cfg: MelConfig, fb: np.ndarray | None = None)
         raise ValueError("win_length must equal n_fft")
     if fb is None:
         fb = _mel_filterbank(cfg)
-    frames = _frames(audio, cfg)
-    log_mel = _frames_to_mel(frames, cfg, fb)
-    return normalize_mel(log_mel, cfg)
+    raw = _raw_frames(audio, cfg)
+    log_mel = _frames_to_mel(raw * _window(cfg)[np.newaxis, :], cfg, fb)
+    return normalize_mel(_stack_td(log_mel, raw, cfg), cfg)
+
+
+def _stack_td(log_mel: np.ndarray, raw: np.ndarray, cfg: MelConfig) -> np.ndarray:
+    if not cfg.time_features:
+        return log_mel
+    return np.concatenate([log_mel, time_domain_features(raw)], axis=0)
 
 
 def normalize_mel(mel: np.ndarray, cfg: MelConfig) -> np.ndarray:
+    """归一化 log-mel 行；时域统计行（若有）已自带固定归一化，原样保留。"""
     if not cfg.normalize:
         return mel
+    m = mel[: cfg.n_mels]
     if cfg.normalization == "fixed":
         if cfg.norm_std <= 0:
             raise ValueError("norm_std must be positive")
-        return ((mel - cfg.norm_mean) / cfg.norm_std).astype(np.float32)
-    if cfg.normalization != "clip":
+        m = (m - cfg.norm_mean) / cfg.norm_std
+    elif cfg.normalization == "clip":
+        m = (m - m.mean()) / (m.std() + 1e-6)
+    else:
         raise ValueError(f"Unknown normalization: {cfg.normalization}")
-    return ((mel - mel.mean()) / (mel.std() + 1e-6)).astype(np.float32)
+    if mel.shape[0] == cfg.n_mels:
+        return m.astype(np.float32)
+    return np.concatenate([m, mel[cfg.n_mels:]], axis=0).astype(np.float32)
+
+
+def gain_scale(cfg: MelConfig) -> float:
+    """1 dB 增益在归一化 log-mel 上的偏移量（逐段标准化下增益被抵消 -> 0）。"""
+    if not cfg.normalize:
+        return 1.0
+    if cfg.normalization == "fixed":
+        return 1.0 / cfg.norm_std
+    return 0.0
 
 
 class MelStream:
@@ -153,7 +256,7 @@ class MelStream:
         self._carried = 0  # buf 中已处理过的样本数（用于游标换算）
 
     def push(self, chunk: np.ndarray) -> np.ndarray:
-        """喂入一块音频，返回本块新产生的 log-mel 帧 [n_mels, T_new]（可能为 0 列）。"""
+        """喂入一块音频，返回本块新产生的特征帧 [n_features, T_new]（可能为 0 列）。"""
         chunk = np.asarray(chunk, dtype=np.float32)
         if self._finished:
             raise RuntimeError("Cannot push after flush")
@@ -169,16 +272,15 @@ class MelStream:
         # 当缓冲中从游标起存在完整一帧时产出
         while self._next_frame_start + cfg.n_fft <= len(self._buf):
             start = self._next_frame_start
-            frame = self._buf[start : start + cfg.win_length]
-            new_frames.append(frame * self.win)
+            new_frames.append(self._buf[start : start + cfg.win_length])
             self._next_frame_start += cfg.hop_length
 
         if not new_frames:
-            return np.zeros((cfg.n_mels, 0), dtype=np.float32)
+            return np.zeros((cfg.n_features, 0), dtype=np.float32)
 
         self._frames_emitted += len(new_frames)
-        frames = np.stack(new_frames, axis=0).astype(np.float32)
-        log_mel = _frames_to_mel(frames, cfg, self.fb)
+        raw = np.stack(new_frames, axis=0).astype(np.float32)
+        log_mel = _stack_td(_frames_to_mel(raw * self.win, cfg, self.fb), raw, cfg)
 
         # 回收已不再需要的旧样本（早于游标 - n_fft 的部分）
         keep_from = max(0, self._next_frame_start - cfg.n_fft + cfg.hop_length)
@@ -190,14 +292,14 @@ class MelStream:
     def flush(self) -> np.ndarray:
         """返回尾部不足一帧时按零填充补出的最后一帧（可选，保持与离线尾部一致）。"""
         if self._finished:
-            return np.zeros((self.cfg.n_mels, 0), dtype=np.float32)
+            return np.zeros((self.cfg.n_features, 0), dtype=np.float32)
         self._finished = True
         # Match compute_mel: one padded frame only for nonempty short audio;
         # discard an incomplete trailing frame after full frames were emitted.
         if self._frames_emitted or not self._total:
-            return np.zeros((self.cfg.n_mels, 0), dtype=np.float32)
-        frame = np.pad(self._buf, (0, self.cfg.n_fft - len(self._buf))) * self.win
-        return _frames_to_mel(frame[None, :], self.cfg, self.fb)
+            return np.zeros((self.cfg.n_features, 0), dtype=np.float32)
+        raw = np.pad(self._buf, (0, self.cfg.n_fft - len(self._buf)))[None, :]
+        return _stack_td(_frames_to_mel(raw * self.win, self.cfg, self.fb), raw, self.cfg)
 
 
 

@@ -22,6 +22,9 @@ features:
   normalization: fixed  # identical affine transform during training/offline/streaming
   norm_mean: -40.0
   norm_std: 20.0
+  # 逐帧时域统计（峰值/峰均比/平顶/瞬态跳变/过零/断续…），拼在 log-mel 之后。
+  # 改变输入维度：开启后须从头训练；旧 checkpoint 保存的 config 无此键，按 false 处理。
+  time_features: true
 
 # ---------- 异常类别 ----------
 # 顺序即标签索引，全 0 = 干净
@@ -115,10 +118,21 @@ train:
   early_stop_patience: 8
   loss: frame_seg        # bce | focal | frame_seg（帧级+片段级双重监督）
   seg_weight: 1.0        # 片段级损失权重（frame_seg 时生效）
+  # 片段级聚合：mean（旧）| linear_softmax | max。损失、验证、离线推理共用。
+  # mean 会被短瞬态（爆音/点击）所在的大量干净帧稀释。
+  clip_pooling: linear_softmax
   focal_gamma: 2.0
   # 类别不平衡正样本权重（覆盖时会按统计自动重算）
   pos_weight: null
   clip_grad: 5.0
+  augment:
+    p: 0.5
+    gain_db: [-4.0, 4.0]   # log 域加性偏移；loudness_anomaly 样本跳过
+    crop_max_frac: 0.1     # 随机丢弃开头帧（替代循环平移）
+    freq_masks: 1
+    freq_mask_max: 20      # 用频带时间均值填充
+    time_mask_p: 0.0       # 默认关闭：人为时间空洞类似 dropout/silence_loss
+    time_mask_max: 10
   num_workers: 4
 
 # ---------- 评估 ----------

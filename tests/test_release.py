@@ -11,6 +11,7 @@ from src.utils.config import load_config
 from src.training.train import partition_sources, build_loaders
 from src.training.losses import build_loss
 from src.data.dataset import LabeledDataset, collate_variable
+from src.models.pooling import clip_pool_np, clip_pooling_method
 
 
 @pytest.mark.parametrize("samples", [1, 2047, 2048, 2489, 44100])
@@ -76,9 +77,10 @@ def test_partition_group_and_duplicate_content(tmp_path):
         assert contents.count(bytes([0])) in (0, 2)
 
 
-@pytest.mark.parametrize("kind", ["bce", "focal", "frame_seg"])
-def test_loss_ignores_padding(kind):
-    loss = build_loss({"train": {"loss": kind}}, torch.ones(7))
+@pytest.mark.parametrize("kind,pooling", [("bce", "mean"), ("focal", "mean"), ("frame_seg", "mean"),
+                                          ("frame_seg", "linear_softmax"), ("frame_seg", "max")])
+def test_loss_ignores_padding(kind, pooling):
+    loss = build_loss({"train": {"loss": kind, "clip_pooling": pooling}}, torch.ones(7))
     x = torch.randn(1, 7, 4)
     y = torch.randint(0, 2, x.shape).float()
     padded_x = torch.cat([x, torch.full((1, 7, 6), 100.0)], dim=-1)
@@ -126,4 +128,5 @@ def test_offline_api_matches_evaluation_scores():
     result = infer_audio(audio, 44100, cfg, model, np.full(7, 0.5), torch.device("cpu"))
     assert result["n_frames"] == expected.shape[1]
     for c, name in enumerate(cfg["classes"]):
-        assert abs(result["clip_level"]["probs"][name] - float(expected[c].mean())) <= 0.000501
+        want = float(clip_pool_np(expected[c], clip_pooling_method(cfg)))
+        assert abs(result["clip_level"]["probs"][name] - want) <= 0.000501

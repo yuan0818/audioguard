@@ -5,7 +5,7 @@ AnomalyDataset 支持：
     source="real"  : 从 data/raw 加载真实音频切分后注入异常（label 来自合成）
                      真实标注（带 label 文件）后续扩展。
 
-返回 (mel[n_mels, T], labels[n_classes, T]) 的 torch 张量。
+返回 (feat[n_mels (+n_td), T], labels[n_classes, T]) 的 torch 张量。
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from torch.utils.data import Dataset
 from src.data import synth_anomalies as synth
 from src.data.augmentations import apply_augmentations
 from src.data.clean_sources import generate_clean_audio
-from src.features.mel import MelConfig, _mel_filterbank, compute_mel
+from src.features.mel import TD_DB_SCALE, TD_LEVEL_ROWS, MelConfig, _mel_filterbank, compute_mel, gain_scale
 from src.utils.audio import load_audio, segment_audio
 
 
@@ -66,6 +66,16 @@ class AnomalyDataset(Dataset):
         if source == "real" and not self._real_paths:
             raise ValueError("source='real' 需提供 real_paths")
 
+        classes = list(cfg.get("classes", synth.CLASS_NAMES))
+        self._aug_kwargs = {
+            "n_mels": self.mel_cfg.n_mels,
+            "params": cfg.get("train", {}).get("augment"),
+            "mel_gain_scale": gain_scale(self.mel_cfg),
+            "level_rows": TD_LEVEL_ROWS if self.mel_cfg.time_features else (),
+            "level_scale": TD_DB_SCALE,
+            "level_class": classes.index("loudness_anomaly") if "loudness_anomaly" in classes else None,
+        }
+
         # 合成模式的确定性子种子由 __getitem__ 的 index 决定
         self._base_seed = int(cfg.get("seed", 42))
 
@@ -90,7 +100,7 @@ class AnomalyDataset(Dataset):
         # 特征
         mel = compute_mel(audio, self.mel_cfg, fb=self._fb)
         if self.augment:
-            mel, labels = apply_augmentations(mel, labels, rng, p=0.5)
+            mel, labels = apply_augmentations(mel, labels, rng, **self._aug_kwargs)
         # 长度对齐（防御性）
         T = min(mel.shape[1], labels.shape[1])
         mel = mel[:, :T]

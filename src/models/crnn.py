@@ -1,7 +1,8 @@
 """全卷积 CRNN：per-frame 多标签异常检测。
 
-输入  : [B, 1, n_mels, T]   —— log-mel 谱图（加通道维）
-主干  : N 个 ConvBlock（仅沿 mel 池化，保留时间维）
+输入  : [B, 1, n_mels + n_td, T] —— log-mel（+ 可选 n_td 行逐帧时域统计）
+主干  : N 个 ConvBlock 只处理 log-mel 行（仅沿 mel 池化，保留时间维）
+时域支路: n_td 行逐帧统计 -> Linear+ReLU，与卷积特征拼接后送入 GRU
 时序头: 单向 GRU（因果，可流式带状态）
 输出头: 逐帧线性 -> [B, n_classes, T] logits（多标签，每帧独立 sigmoid）
 
@@ -29,6 +30,8 @@ class CRNN(nn.Module):
         gru_hidden: int = 128,
         dropout: float = 0.2,
         n_layers: int = 1,
+        n_td: int = 0,
+        td_hidden: int = 32,
     ) -> None:
         super().__init__()
         assert len(channels) == len(kernel) == len(pool), "channels/kernel/pool 长度须一致"
@@ -36,6 +39,7 @@ class CRNN(nn.Module):
         self.n_classes = n_classes
         self.gru_hidden = gru_hidden
         self.n_layers = n_layers
+        self.n_td = n_td
 
         blocks: list[nn.Module] = []
         in_ch = 1
@@ -61,6 +65,11 @@ class CRNN(nn.Module):
         self.mel_reduced = max(mel_reduced, 1)
         self.last_ch = channels[-1]
         gru_in = self.last_ch * self.mel_reduced
+        if n_td:
+            self.td_proj = nn.Sequential(nn.Linear(n_td, td_hidden), nn.ReLU(inplace=True))
+            gru_in += td_hidden
+        else:
+            self.td_proj = None
 
         self.gru = nn.GRU(
             input_size=gru_in,
@@ -73,8 +82,11 @@ class CRNN(nn.Module):
 
     @classmethod
     def from_cfg(cls, cfg: Mapping) -> "CRNN":
+        from src.features.mel import N_TD
+
         m = cfg["model"]
         spec = m[m["name"]]  # small | base 配置块
+        n_td = N_TD if cfg.get("features", {}).get("time_features", False) else 0
         return cls(
             n_mels=m.get("n_mels", 128),
             n_classes=m.get("n_classes", 7),
@@ -83,19 +95,37 @@ class CRNN(nn.Module):
             pool=spec["pool"],
             gru_hidden=spec["gru_hidden"],
             dropout=spec.get("dropout", 0.2),
+            n_td=n_td,
+            td_hidden=spec.get("td_hidden", 32),
         )
+
+    @property
+    def n_features(self) -> int:
+        return self.n_mels + self.n_td
+
+    def _split(self, x: torch.Tensor):
+        if x.dim() == 3:  # [B,F,T] -> 加通道
+            x = x.unsqueeze(1)
+        if x.shape[2] != self.n_features:
+            raise ValueError(f"Expected {self.n_features} feature rows "
+                             f"({self.n_mels} mel + {self.n_td} time-domain), got {x.shape[2]}")
+        return x[:, :, : self.n_mels], (x[:, 0, self.n_mels :] if self.n_td else None)
+
+    def _sequence(self, conv: torch.Tensor, td: torch.Tensor | None) -> torch.Tensor:
+        B, C, M, T = conv.shape
+        seq = conv.reshape(B, C * M, T).permute(0, 2, 1)  # [B, T, C*mel']
+        if td is not None:
+            seq = torch.cat([seq, self.td_proj(td.permute(0, 2, 1))], dim=-1)
+        return seq.contiguous()
 
     def forward(self, x: torch.Tensor, hidden: torch.Tensor | None = None):
         """x: [B,1,n_mels,T] -> (logits [B,n_classes,T], new_hidden)。
 
         hidden 为 None 时自动初始化。流式增量推理时传入上一步返回的 hidden。
         """
-        if x.dim() == 3:  # [B,n_mels,T] -> 加通道
-            x = x.unsqueeze(1)
-        x = self.conv(x)  # [B, C, mel', T]
-        B, C, M, T = x.shape
-        x = x.reshape(B, C * M, T)        # [B, C*mel', T]
-        x = x.permute(0, 2, 1).contiguous()  # [B, T, C*mel']
+        mel, td = self._split(x)
+        x = self._sequence(self.conv(mel), td)  # [B, T, C*mel' (+td_hidden)]
+        B = x.shape[0]
 
         if hidden is None:
             hidden = x.new_zeros(self.n_layers, B, self.gru_hidden)
@@ -112,17 +142,15 @@ class CRNN(nn.Module):
         """
         if self.training:
             raise RuntimeError("Streaming requires eval mode")
-        if x.dim() == 3:
-            x = x.unsqueeze(1)
+        mel, td = self._split(x)
         context, hidden = state if state is not None else (None, None)
-        n_new = x.shape[-1]
+        n_new = mel.shape[-1]
         if n_new == 0:
             raise ValueError("Expected at least one frame")
-        joined = x if context is None else torch.cat([context, x], dim=-1)
+        joined = mel if context is None else torch.cat([context, mel], dim=-1)
         keep = sum(block._causal_time for block in self.conv)
         conv = self.conv(joined)[..., -n_new:]
-        B, C, M, T = conv.shape
-        seq = conv.reshape(B, C * M, T).permute(0, 2, 1).contiguous()
+        seq = self._sequence(conv, td)
         out, hidden = self.gru(seq, hidden)
         logits = self.head(out).permute(0, 2, 1).contiguous()
         context = joined[..., -keep:].detach() if keep else None

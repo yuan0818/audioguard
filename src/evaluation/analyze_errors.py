@@ -68,7 +68,7 @@ def main() -> int:
         if fp + fn == 0:
             continue
         fig, axes = plt.subplots(2, 1, figsize=(10, 5), sharex=True)
-        axes[0].imshow(mel[0, 0].cpu().numpy(), aspect="auto", origin="lower", cmap="magma")
+        axes[0].imshow(mel[0, 0, : model.n_mels].cpu().numpy(), aspect="auto", origin="lower", cmap="magma")
         axes[0].set_title(f"sample {idx}  FP={fp} FN={fn}")
         axes[0].set_ylabel("mel bin")
         t = np.arange(probs.shape[1])

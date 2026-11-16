@@ -16,6 +16,7 @@ features:
   normalization: fixed
   norm_mean: -40.0
   norm_std: 20.0
+  time_features: true
 classes:
 - noise
 - harsh
@@ -168,6 +169,7 @@ train:
   early_stop_patience: 8
   loss: frame_seg
   seg_weight: 1.0
+  clip_pooling: linear_softmax
   focal_gamma: 2.0
   pos_weight:
   - 1.0

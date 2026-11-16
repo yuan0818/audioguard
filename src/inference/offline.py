@@ -20,6 +20,7 @@ import torch
 from src.features.mel import MelConfig, compute_mel
 from src.inference.streaming import StreamingDetector, probs_to_segments, smooth_probs
 from src.models.crnn import build_model
+from src.models.pooling import clip_pool_np, clip_pooling_method
 from src.utils.audio import load_audio
 from src.utils.config import load_config_resolved
 
@@ -84,8 +85,8 @@ def infer_audio(audio: np.ndarray, sr: int, cfg: dict, model, thresholds, device
     min_ms = cfg.get("inference", {}).get("offline", {}).get("min_segment_ms", 200)
     segs = probs_to_segments(preds, mel_cfg, min_segment_ms=min_ms)
 
-    # 片段级整段判定：帧概率沿时间均值聚合 -> 每类一个片段概率，按片段阈值判
-    clip_probs = probs.mean(axis=1)  # [n_classes]
+    # 片段级整段判定：帧概率按训练时同一 pooling 聚合 -> 每类一个片段概率，按片段阈值判
+    clip_probs = clip_pool_np(probs, clip_pooling_method(cfg), axis=1)  # [n_classes]
     if clip_thresholds is not None:
         clip_pred = clip_probs >= np.asarray(clip_thresholds)
     else:

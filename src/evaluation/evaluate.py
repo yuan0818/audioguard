@@ -2,7 +2,7 @@
 
 提供帧级与片段级两套指标：
 - 帧级：逐帧判定（苛刻，瞬态类易混）。
-- 片段级：帧概率沿时间均值聚合为片段概率、帧标签 max 聚合为片段标签，
+- 片段级：帧概率按 clip_pooling（mean / linear_softmax / max）聚合为片段概率、帧标签 max 聚合为片段标签，
   即「整段判定」的产品语义指标。
 """
 
@@ -12,6 +12,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
+from src.models.pooling import clip_pool_np
 from src.training.metrics import compute_metrics, format_metrics, tune_thresholds
 
 
@@ -22,15 +23,15 @@ def _cat_flat(p_list, y_list) -> tuple[np.ndarray, np.ndarray]:
     return np.concatenate(ps, axis=0), np.concatenate(ys, axis=0)
 
 
-def _cat_clip(p_list, y_list) -> tuple[np.ndarray, np.ndarray]:
-    """聚合到片段级：prob 沿时间均值、label 沿时间 max -> [N_clips, C]。"""
-    ps = [p.mean(axis=2) for p in p_list]   # [B,C]
+def _cat_clip(p_list, y_list, pooling: str = "mean") -> tuple[np.ndarray, np.ndarray]:
+    """聚合到片段级：prob 按 pooling 沿时间聚合、label 沿时间 max -> [N_clips, C]。"""
+    ps = [clip_pool_np(p, pooling, axis=2) for p in p_list]   # [B,C]
     ys = [y.max(axis=2) for y in y_list]    # [B,C]
     return np.concatenate(ps, axis=0), np.concatenate(ys, axis=0)
 
 
 @torch.no_grad()
-def collect_predictions_dual(model, dataloader, device, smooth_window=1):
+def collect_predictions_dual(model, dataloader, device, smooth_window=1, clip_pooling="mean"):
     from src.inference.streaming import smooth_probs
     model.eval()
     all_p, all_y = [], []
@@ -45,7 +46,7 @@ def collect_predictions_dual(model, dataloader, device, smooth_window=1):
             all_p.append(smooth_probs(p[:, :n], smooth_window)[None, ...])
             all_y.append(y[:, :n][None, ...])
     fp, fl = _cat_flat(all_p, all_y)
-    cp, cl = _cat_clip(all_p, all_y)
+    cp, cl = _cat_clip(all_p, all_y, clip_pooling)
     return fp, fl, cp, cl
 
 
@@ -62,6 +63,7 @@ def evaluate_model(
     class_names: list[str] | None = None,
     clip_thresholds: np.ndarray | None = None,
     smooth_window: int = 1,
+    clip_pooling: str = "mean",
 ) -> tuple[dict, np.ndarray, np.ndarray]:
     """评估帧级 + 片段级。
 
@@ -69,7 +71,7 @@ def evaluate_model(
     返回 (metrics, frame_thresholds, clip_thresholds)。
     metrics 兼容旧格式：含 frame/clip 两组 + 顶层 per_class/macro 指向帧级（训练早停用）。
     """
-    fp, fl, cp, cl = collect_predictions_dual(model, dataloader, device, smooth_window)
+    fp, fl, cp, cl = collect_predictions_dual(model, dataloader, device, smooth_window, clip_pooling)
     if thresholds is None:
         thresholds = tune_thresholds(fp, fl)
     if clip_thresholds is None:

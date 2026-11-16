@@ -33,7 +33,7 @@ class StreamingDetector:
         self.hop_frames = hop_frames
         self.smooth_window = smooth_window
         self.retain_history = retain_history
-        self._pending = np.zeros((mel_cfg.n_mels, 0), dtype=np.float32)
+        self._pending = np.zeros((mel_cfg.n_features, 0), dtype=np.float32)
         self._state = None
         self._history = []
         self._smooth = np.zeros((model.n_classes, 0), dtype=np.float32)
